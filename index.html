@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACE OF SKY II</title>
+<link rel="stylesheet" href="css/style.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js" } }
+</script>
+</head>
+<body>
+<!-- single shared WebGL surface (engine.js owns it) -->
+<canvas id="gl"></canvas>
+
+<!-- mode screens — each module renders into its own root and toggles .hidden -->
+<div id="screen-menu"     class="screen hidden"></div>
+<div id="screen-creative" class="screen hidden"></div>
+<div id="screen-campaign" class="screen hidden"></div>
+<div id="screen-pvp"      class="screen hidden"></div>
+<div id="screen-hangar"   class="hidden"></div>
+
+<!-- in-flight HUD (battle.js builds the bars; uses the 2D overlay canvas) -->
+<div id="hud" class="hidden">
+  <canvas id="hud-canvas"></canvas>
+</div>
+
+<!-- shared overlays -->
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+
+<!-- boot splash, removed by main.js -->
+<div id="boot" class="loading">
+  <div class="spinner"></div>
+  <div>ACE OF SKY II — initializing systems…</div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
