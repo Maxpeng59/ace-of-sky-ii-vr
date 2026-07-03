@@ -37,7 +37,7 @@ import { computeStats, dragForce, thermoStep, partCenter, navalCruise, AMBIENT_T
 import { PARTS } from './parts.js';
 import { State, importCode, exportCode, stockGet } from './core.js';
 import { setScene, onFrame, resetView, isPresenting } from './engine.js';
-import { setVRMode } from './vr.js';
+import { setVRMode, addEnterVRButton } from './vr.js';
 import {
   LockSystem, leadPoint, homeMissile, drawPrediction, drawLockReticle,
 } from './prediction.js';
@@ -754,6 +754,14 @@ class Sim {
     this._onResize = () => this.resizeHUD();
     addEventListener('resize', this._onResize);
 
+    // ENTER VR lives on the battle HUD too (it used to exist only on the main menu, which
+    // made the cockpit unreachable: an immersive session can't see or tap the page DOM, so
+    // you could never enter VR once a battle was running). Hidden unless WebXR is available.
+    const vrWrap = el('div');
+    vrWrap.style.cssText = 'position:absolute;top:12px;right:14px;pointer-events:auto;z-index:12;';
+    addEnterVRButton(vrWrap);
+    hud.appendChild(vrWrap);
+
     // bottom-left: status bars
     const bl = el('div', 'hud-bl');
     bl.innerHTML = `
@@ -915,6 +923,14 @@ class Sim {
   //  MAIN FRAME
   // ---------------------------------------------------------------------
   frame(dt){
+    // VR: attach the cockpit rig the moment a session goes live — however it was entered
+    // (mid-battle from the HUD button included), not only if the battle STARTED while
+    // presenting. Detach + restore the airframe/camera when the session ends.
+    const vrNow = isPresenting();
+    if (vrNow !== this._vrOn){
+      this._vrOn = vrNow;
+      setVRMode(vrNow ? 'cockpit' : 'menu', vrNow ? { scene: this.scene, camera: this.camera, sim: this } : null);
+    }
     if (this.over){ this.renderHUD(dt); return; }
     if (!(dt > 0)) return;              // guard zero/negative dt (paused/odd clock)
     dt = Math.min(dt, 0.05);            // extra safety for the physics step

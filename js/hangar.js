@@ -590,6 +590,13 @@ function updateMoveGizmo(){
 // ----------------------------------------------------------------------------
 function frame(dt){
   if (!S || S.destroyed) return;
+  // VR: attach the parts-shelf mode whenever a session goes live mid-build (not only if
+  // the hangar was opened while already presenting); detach when the session ends.
+  const vrNow = !!(engine.isPresenting && engine.isPresenting());
+  if (vrNow !== S._vrOn){
+    S._vrOn = vrNow;
+    setVRMode(vrNow ? 'hangar' : 'menu', vrNow ? { scene: S.scene, place: (k, w) => Hangar.vrPlace(k, w) } : null);
+  }
   updateGhost();
   updateMoveGizmo();
 }

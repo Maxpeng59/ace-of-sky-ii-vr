@@ -11,7 +11,7 @@
 //  on a WebXR-capable device, and every hook is guarded by isPresenting().
 // ============================================================================
 import * as THREE from 'three';
-import { getRenderer, onVRFrame, isPresenting } from './engine.js';
+import { getRenderer, onVRFrame, isPresenting, setScene } from './engine.js';
 import { PARTS, CATEGORIES } from './parts.js';
 
 let session = null, renderer = null;
@@ -53,12 +53,66 @@ export async function enterVR(){
   setupControllers();
   setButtonsLabel('🥽 EXIT VR');
   session.addEventListener('end', onSessionEnd);
+  // Entering from the MENU: there is no 3D scene yet (the menu is pure DOM, which an immersive
+  // session can't show), so without this the player stands in a BLACK VOID. Give them a lit
+  // holodeck-style room with instructions instead.
+  if (!ctx || mode === 'menu') showMenuSpace();
 }
 export function endVR(){ if (session) session.end(); }
 function onSessionEnd(){
   session = null; teardownControllers();
-  if (rig && rig.parent) rig.parent.remove(rig);
-  rig = null; setButtonsLabel('🥽 ENTER VR');
+  detachRig();
+  disposeMenuSpace();
+  setButtonsLabel('🥽 ENTER VR');
+}
+
+// remove the rig and UNDO its side effects: re-show the player's airframe that cockpit
+// mode hid, and hand the camera back to its old parent so the desktop chase-cam works.
+function detachRig(){
+  if (!rig) return;
+  const u = rig.userData || {};
+  if (u.cam){ rig.remove(u.cam); if (u.camParent) u.camParent.add(u.cam); }
+  if (u.hidCraft && u.hidCraft.group) u.hidCraft.group.visible = true;
+  if (rig.parent) rig.parent.remove(rig);
+  rig = null;
+}
+
+// ---------------------------------------------------------------------------
+//  MENU SPACE — a small lit room shown when VR starts outside a battle/hangar,
+//  so entering from the menu is never a black void.
+// ---------------------------------------------------------------------------
+let menuSpace = null;
+function showMenuSpace(){
+  disposeMenuSpace();
+  const sc = new THREE.Scene();
+  sc.background = new THREE.Color(0x0e1620);
+  sc.fog = new THREE.Fog(0x0e1620, 12, 70);
+  sc.add(new THREE.HemisphereLight(0x9fc6ff, 0x1a232e, 1.1));
+  const grid = new THREE.GridHelper(60, 30, 0x39d0ff, 0x1f3a52); sc.add(grid);
+  const cv = document.createElement('canvas'); cv.width = 1024; cv.height = 256;
+  const c2 = cv.getContext('2d');
+  c2.fillStyle = '#0e1620'; c2.fillRect(0, 0, 1024, 256);
+  c2.strokeStyle = '#39d0ff'; c2.lineWidth = 6; c2.strokeRect(8, 8, 1008, 240);
+  c2.fillStyle = '#dfe8f5'; c2.font = 'bold 52px monospace'; c2.textAlign = 'center';
+  c2.fillText('ACE OF SKY — VR READY', 512, 92);
+  c2.font = '34px monospace'; c2.fillStyle = '#9fc0d8';
+  c2.fillText('Take the headset off / exit VR, launch a battle', 512, 156);
+  c2.fillText('from the page — the cockpit then loads around you.', 512, 204);
+  const tex = new THREE.CanvasTexture(cv);
+  const panel = new THREE.Mesh(new THREE.PlaneGeometry(4, 1), new THREE.MeshBasicMaterial({ map: tex }));
+  panel.position.set(0, 1.5, -3); sc.add(panel);
+  const cam = new THREE.PerspectiveCamera(70, 1, 0.05, 200);
+  sc.add(cam);                                   // headset pose applies relative to the scene floor
+  menuSpace = { sc, cam, tex, panel, grid };
+  setScene(sc, cam);
+}
+function disposeMenuSpace(){
+  if (!menuSpace) return;
+  menuSpace.tex.dispose(); menuSpace.panel.geometry.dispose(); menuSpace.panel.material.dispose();
+  if (menuSpace.grid.geometry) menuSpace.grid.geometry.dispose();
+  if (menuSpace.grid.material && menuSpace.grid.material.dispose) menuSpace.grid.material.dispose();
+  setScene(null, null);
+  menuSpace = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,9 +160,9 @@ function ensureControllersIn(scene){
 // ---------------------------------------------------------------------------
 export function setVRMode(m, context){
   mode = m || 'menu'; ctx = context || null;
-  if (rig && rig.parent) rig.parent.remove(rig);
-  rig = null;
+  detachRig();
   if (!isPresenting() || !ctx) return;
+  disposeMenuSpace();                         // a real mode replaces the holding room
   if (mode === 'cockpit') buildCockpit();
   else if (mode === 'hangar') buildHangarVR();
 }
@@ -128,9 +182,18 @@ function buildCockpit(){
   if (!scene || !cam) return;
   rig = new THREE.Group(); scene.add(rig);
   // the headset camera rides in the rig; controllers too, so they move with the plane
+  rig.userData.cam = cam; rig.userData.camParent = cam.parent || null;
   if (cam.parent) cam.parent.remove(cam);
   rig.add(cam);
   for (const c of controllers){ rig.add(c.ctrl); rig.add(c.grip); }
+  // HIDE the pilot's own airframe: the rig sits at the craft's centre, which is INSIDE the
+  // fuselage geometry — leaving it visible walls the pilot in darkness and buries the stick
+  // and throttle inside the hull. First-person standard: you ARE the plane, so don't draw it.
+  // (detachRig restores visibility on exit / mode change.)
+  if (ctx.sim && ctx.sim.player && ctx.sim.player.group){
+    ctx.sim.player.group.visible = false;
+    rig.userData.hidCraft = ctx.sim.player;
+  }
 
   const g = new THREE.Group(); rig.add(g); cockpit = { group: g };
   const dark = (c) => new THREE.MeshStandardMaterial({ color: c, metalness: 0.5, roughness: 0.5 });
