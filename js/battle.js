@@ -32,11 +32,11 @@
 //      drive remote craft from received transforms (NO AI), interpolate.
 // ============================================================================
 import * as THREE from 'three';
-import { clamp, lerp, dampF, $, el, show, hide, sfx, toast, fmtNum } from './util.js';
+import { clamp, lerp, dampF, $, el, show, hide, sfx, toast, fmtNum, mulberry32 } from './util.js';
 import { computeStats, dragForce, thermoStep, partCenter, navalCruise, AMBIENT_TEMP, OVERHEAT_TEMP, RHO } from './physics.js';
 import { PARTS } from './parts.js';
 import { State, importCode, exportCode, stockGet } from './core.js';
-import { setScene, onFrame, resetView, isPresenting } from './engine.js';
+import { setScene, onFrame, resetView, isPresenting, getRenderer } from './engine.js';
 import { setVRMode, addEnterVRButton } from './vr.js';
 import {
   LockSystem, leadPoint, homeMissile, drawPrediction, drawLockReticle,
@@ -47,7 +47,7 @@ import { initAI, updateAI, updateBomber, updateCarrierPD, pickTarget } from './a
 //  Environment presets — sky gradient, sun, fog and surface look per env.
 // ---------------------------------------------------------------------------
 const ENVS = {
-  day:  { top: 0x4a93d6, bot: 0xbfe2ff, sun: 0xfff3da, sunInt: 1.5, hemi: 0x9fc6ff, hemiGround: 0x4a5a44, fog: 0xbfe2ff, fogNear: 1400, fogFar: 9000, sunPos: [-0.4, 0.7, 0.5], ground: 0x4a6a3a, sea: false, ambient: 0.55 },
+  day:  { top: 0x4a93d6, bot: 0xbfe2ff, sun: 0xfff3da, sunInt: 1.5, hemi: 0x9fc6ff, hemiGround: 0x55684e, fog: 0xbfe2ff, fogNear: 1400, fogFar: 9000, sunPos: [-0.4, 0.7, 0.5], ground: 0x5d7f49, sea: false, ambient: 0.6 },
   dusk: { top: 0x2a2350, bot: 0xff8a4a, sun: 0xffb066, sunInt: 1.2, hemi: 0xff9a6a, hemiGround: 0x281c30, fog: 0xc66a44, fogNear: 1100, fogFar: 7500, sunPos: [-0.85, 0.18, 0.2], ground: 0x4a3a32, sea: false, ambient: 0.4 },
   night:{ top: 0x05080f, bot: 0x0d1626, sun: 0x7088c0, sunInt: 0.45, hemi: 0x223355, hemiGround: 0x05080f, fog: 0x080d18, fogNear: 700, fogFar: 5200, sunPos: [-0.3, 0.6, 0.4], ground: 0x10161e, sea: false, ambient: 0.25, stars: true },
   sea:  { top: 0x3f86c8, bot: 0xa9d6f5, sun: 0xfff0d0, sunInt: 1.45, hemi: 0x9fd0ff, hemiGround: 0x12506e, fog: 0xa9d6f5, fogNear: 1600, fogFar: 9500, sunPos: [-0.5, 0.6, 0.4], ground: 0x14506e, sea: true, ambient: 0.5 },
@@ -73,6 +73,66 @@ const _ZAXIS = new THREE.Vector3(0, 0, 1);
 const _turretLead = new THREE.Vector3();
 
 // Animate the open-ocean surface: three travelling swell components at different
+// ---- procedural surface textures (generated once per battle; no external assets) ----
+// Water micro-ripple NORMAL map: a tiling height field of soft blobs → Sobel → tangent-space
+// normals. Scrolled slowly over the big CPU swells it adds the fine sparkle that sells water.
+function makeWaterNormalTex(){
+  const S = 256, cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const c2 = cv.getContext('2d');
+  c2.fillStyle = 'rgb(128,128,128)'; c2.fillRect(0, 0, S, S);
+  const rnd = mulberry32 ? mulberry32(7331) : Math.random;
+  for (let i = 0; i < 240; i++){
+    const x = rnd() * S, y = rnd() * S, r = 6 + rnd() * 22, up = rnd() < 0.5;
+    for (const ox of [-S, 0, S]) for (const oy of [-S, 0, S]){          // draw wrapped so the tile seams vanish
+      const g = c2.createRadialGradient(x + ox, y + oy, 0, x + ox, y + oy, r);
+      g.addColorStop(0, up ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.10)');
+      g.addColorStop(1, 'rgba(128,128,128,0)');
+      c2.fillStyle = g; c2.beginPath(); c2.arc(x + ox, y + oy, r, 0, Math.PI * 2); c2.fill();
+    }
+  }
+  const src = c2.getImageData(0, 0, S, S).data;
+  const out = c2.createImageData(S, S), d = out.data;
+  const H = (x, y) => src[(((y + S) % S) * S + ((x + S) % S)) * 4];      // height = red channel, wrapped
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++){
+    const dx = (H(x + 1, y) - H(x - 1, y)) / 255, dy = (H(x, y + 1) - H(x, y - 1)) / 255;
+    const i = (y * S + x) * 4;
+    d[i] = (0.5 - dx * 1.6) * 255; d[i + 1] = (0.5 - dy * 1.6) * 255; d[i + 2] = 255; d[i + 3] = 255;
+  }
+  c2.putImageData(out, 0, 0);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+// Terrain colour mottle: patchy vegetation/dirt over the base ground colour, tiling.
+function makeGroundTex(baseHex){
+  const S = 512, cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const c2 = cv.getContext('2d');
+  const base = new THREE.Color(baseHex);
+  c2.fillStyle = `rgb(${base.r * 255 | 0},${base.g * 255 | 0},${base.b * 255 | 0})`; c2.fillRect(0, 0, S, S);
+  const rnd = mulberry32 ? mulberry32(4242) : Math.random;
+  for (let i = 0; i < 420; i++){
+    const x = rnd() * S, y = rnd() * S, r = 5 + rnd() * 22;
+    const k = rnd(); const a = 0.03 + rnd() * 0.05;
+    // balance lighten vs darken so the tile keeps the BASE brightness (overlapping dark
+    // blobs otherwise compound into a near-black field under filmic tone mapping)
+    const tint = k < 0.4 ? `rgba(8,14,6,${a})` : (k < 0.85 ? `rgba(215,230,165,${a})` : `rgba(130,100,60,${a * 0.9})`);
+    for (const ox of [-S, 0, S]) for (const oy of [-S, 0, S]){
+      const g = c2.createRadialGradient(x + ox, y + oy, 0, x + ox, y + oy, r);
+      g.addColorStop(0, tint); g.addColorStop(1, 'rgba(0,0,0,0)');
+      c2.fillStyle = g; c2.beginPath(); c2.arc(x + ox, y + oy, r, 0, Math.PI * 2); c2.fill();
+    }
+  }
+  // re-centre toward the base colour so the net tile brightness matches env.ground
+  c2.globalAlpha = 0.30;
+  c2.fillStyle = `rgb(${base.r * 255 | 0},${base.g * 255 | 0},${base.b * 255 | 0})`;
+  c2.fillRect(0, 0, S, S);
+  c2.globalAlpha = 1;
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 // headings/speeds (a living sea instead of a flat, icy plane). Heights stay small
 // vs the play scale, so the +8 m float clearance keeps the collision feel intact.
 function updateSeaGeo(geo, base, t){
@@ -408,6 +468,37 @@ class Sim {
     scene.add(new THREE.HemisphereLight(env.hemi, env.hemiGround, env.ambient * 1.4));
     scene.add(new THREE.AmbientLight(0xffffff, env.ambient * 0.3));
 
+    // PBR ENVIRONMENT — metals mirror their WORLD. Without an environment map every
+    // MeshStandardMaterial reflects pure black, which is why hulls read as matte plastic.
+    // Bake a tiny sky ball matching THIS map (gradient + sun hotspot + ground bounce) into
+    // a PMREM and hand it to every material in the scene. Disposed in teardown.
+    {
+      const pm = new THREE.PMREMGenerator(getRenderer());
+      const es = new THREE.Scene();
+      const em = new THREE.ShaderMaterial({
+        side: THREE.BackSide,
+        uniforms: {
+          top: { value: new THREE.Color(env.top) }, bot: { value: new THREE.Color(env.bot) },
+          gnd: { value: new THREE.Color(env.ground) }, sunDir: { value: new THREE.Vector3(env.sunPos[0], env.sunPos[1], env.sunPos[2]).normalize() },
+          sunCol: { value: new THREE.Color(env.sun) }, sunI: { value: env.sunInt },
+        },
+        vertexShader: 'varying vec3 vp; void main(){ vp = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+        fragmentShader: `varying vec3 vp; uniform vec3 top; uniform vec3 bot; uniform vec3 gnd; uniform vec3 sunDir; uniform vec3 sunCol; uniform float sunI;
+          void main(){
+            vec3 sky = mix(bot, top, pow(clamp(vp.y * 0.5 + 0.5, 0.0, 1.0), 0.8));
+            vec3 col = vp.y < 0.0 ? mix(bot, gnd, clamp(-vp.y * 3.0, 0.0, 1.0)) : sky;   // ground bounce below the horizon
+            float s = pow(max(dot(vp, sunDir), 0.0), 260.0) * 6.0 + pow(max(dot(vp, sunDir), 0.0), 8.0) * 0.55;
+            col += sunCol * s * sunI;                                                      // sun disc + halo drive the speculars
+            gl_FragColor = vec4(col, 1.0);
+          }`,
+      });
+      const eg = new THREE.SphereGeometry(50, 32, 16);
+      es.add(new THREE.Mesh(eg, em));
+      this.envRT = pm.fromScene(es, 0.05);          // keep the RENDER TARGET: disposing only its
+      scene.environment = this.envRT.texture;        // .texture leaks the framebuffer every battle
+      pm.dispose(); eg.dispose(); em.dispose();
+    }
+
     // ground / sea — a big plane with subtle detail
     const size = 24000;
     const segs = env.sea ? 160 : 64;                 // finer mesh on water so swells actually read
@@ -429,10 +520,25 @@ class Sim {
       }
       geo.computeVertexNormals();
     }
-    const groundMat = new THREE.MeshStandardMaterial({
-      color: env.ground, metalness: env.sea ? 0.08 : 0.0, roughness: env.sea ? 0.52 : 0.95,
-      flatShading: !env.sea,
-    });
+    // REALISM: water is a glossy dielectric that mirrors the sky (env map + a scrolling
+    // micro-ripple normal map over the big CPU swells); land gets a mottled vegetation
+    // texture and smooth shading instead of a flat-colour faceted sheet.
+    let groundMat;
+    if (env.sea){
+      this.seaNormTex = makeWaterNormalTex();
+      this.seaNormTex.repeat.set(90, 90);
+      groundMat = new THREE.MeshStandardMaterial({
+        color: env.ground, metalness: 0.0, roughness: 0.16,
+        normalMap: this.seaNormTex, normalScale: new THREE.Vector2(0.55, 0.55),
+        envMapIntensity: 1.35,
+      });
+    } else {
+      const gt = makeGroundTex(env.ground);
+      gt.repeat.set(30, 30);
+      groundMat = new THREE.MeshStandardMaterial({
+        color: 0xffffff, map: gt, metalness: 0.0, roughness: 0.95, envMapIntensity: 0.7,
+      });
+    }
     const ground = new THREE.Mesh(geo, groundMat);
     ground.receiveShadow = true;
     scene.add(ground);
@@ -972,7 +1078,12 @@ class Sim {
     this.updateTorpedoes(dt);
     this.updateFlares(dt);
     this.updateFX(dt);
-    if (this.seaGeo){ this.seaT += dt; updateSeaGeo(this.seaGeo, this.seaBase, this.seaT); }  // roll the ocean
+    if (this.seaGeo){
+      this.seaT += dt; updateSeaGeo(this.seaGeo, this.seaBase, this.seaT);   // roll the ocean
+      if (this.seaNormTex){                          // drift the micro-ripples across the swells
+        this.seaNormTex.offset.x += dt * 0.012; this.seaNormTex.offset.y += dt * 0.009;
+      }
+    }
 
     // 8. lock system (player) + camera
     this.updateLock(dt);
@@ -2553,6 +2664,11 @@ class Sim {
     // per-battle torpedo materials (shared across all torpedoes; may have no live mesh at teardown)
     if (this.torpedoMat){ this.torpedoMat.dispose(); this.torpedoMat = null; }
     if (this.wakeMat){ this.wakeMat.dispose(); this.wakeMat = null; }
+    // the PMREM environment is on scene.environment, which the object traverse above never
+    // visits — dispose the RENDER TARGET explicitly or every battle leaks it (the 3 GB lesson).
+    if (this.scene) this.scene.environment = null;
+    if (this.envRT){ this.envRT.dispose(); this.envRT = null; }
+    this.seaNormTex = null;   // its GPU copy is freed by the material-texture traverse above
     this.bullets.length = 0; this.missiles.length = 0; this.torpedoes.length = 0; this.flares.length = 0; this.fx.length = 0;
     this.craft.length = 0; this.carriers.length = 0;
     resetView();

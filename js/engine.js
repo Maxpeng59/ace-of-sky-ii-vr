@@ -22,6 +22,10 @@ export function initEngine(canvasEl){
   // in VR (two eyes, high-res panels) that's a large hidden fill cost for a barely-visible change.
   renderer.shadowMap.type = THREE.PCFShadowMap;
   if ('outputColorSpace' in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
+  // Filmic tone mapping: rolls off highlights and enriches mids like a camera instead of
+  // hard-clipping to white — the single cheapest step toward photographic realism.
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.28;   // ACES crushes mids; the palettes were tuned pre-filmic
   renderer.xr.enabled = true;                       // WebXR: lets a screen enter immersive VR
   addEventListener('resize', resize);
   resize();
