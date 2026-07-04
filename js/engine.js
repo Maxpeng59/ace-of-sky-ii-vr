@@ -15,7 +15,9 @@ let running = false, last = 0;
 export function initEngine(canvasEl){
   canvas = canvasEl || document.getElementById('gl');
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+  // cap at 1.5×: the PBR env lighting is per-PIXEL, and full Retina 2× is 4× the pixels of 1×
+  // for detail invisible at combat range. (Headset rendering uses the XR framebuffer, not this.)
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.5));
   renderer.setSize(innerWidth, innerHeight, false);
   renderer.shadowMap.enabled = true;
   // PCF (not PCFSoft): the soft variant taps the shadow map many more times PER LIT PIXEL —
