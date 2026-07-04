@@ -246,13 +246,21 @@ function buildAircraftMesh(design){
           // Left at part-def metalness it mirrors the bright PMREM sky and reads as GLOWING.
           o.material.metalness = Math.min(o.material.metalness ?? 0.5, 0.32);
           o.material.roughness = Math.max(o.material.roughness ?? 0.5, 0.55);
-          o.material.envMapIntensity = 0.65;
         }
       }
     });
   }
   group.userData.dropTanks = dropTanks;
   mergeStaticMeshes(group);    // collapse the static airframe to a handful of draw calls
+  // TAME THE SKY REFLECTION on the WHOLE airframe (painted AND bare metal, merged AND turret/
+  // weapon nodes). The PMREM environment feeds both specular reflection and DIFFUSE sky
+  // irradiance; at full intensity that made hulls read as GLOWING. 0.28 keeps a believable
+  // metallic sheen + sun glint without the bloom. Water sets its own higher intensity in buildWorld.
+  group.traverse(o => {
+    if (!o.isMesh || !o.material) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) if (m && 'envMapIntensity' in m) m.envMapIntensity = 0.28;
+  });
   return group;
 }
 
@@ -533,8 +541,8 @@ class Sim {
       this.seaNormTex = makeWaterNormalTex();
       this.seaNormTex.repeat.set(90, 90);
       groundMat = new THREE.MeshStandardMaterial({
-        color: env.ground, metalness: 0.0, roughness: 0.16,
-        normalMap: this.seaNormTex, normalScale: new THREE.Vector2(0.55, 0.55),
+        color: env.ground, metalness: 0.0, roughness: 0.22,   // slightly rougher than a mirror: the sun glitter
+        normalMap: this.seaNormTex, normalScale: new THREE.Vector2(0.55, 0.55),   // survives, but the reflection stops aliasing at lower res
         envMapIntensity: 1.35,
       });
     } else {
